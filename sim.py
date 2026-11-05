@@ -1,6 +1,6 @@
 """
 sim.py -- Tier 1 simulator for "when does recalibration blind a streaming detector?"
-Implements protocol revision 4 (protocol.md): generators, baseline policies, CUSUM, matched-false-alarm
+Implements protocol revision 5 (protocol.md): generators, baseline policies, CUSUM, matched-false-alarm
 calibration, gated-1L / gated-2L, per-event metrics, the dev-seed go/no-go, the benign-drift (H3f) runner,
 the model stream (H2b), blind-cell list, trend tests and gate evaluation.
 
@@ -15,7 +15,7 @@ the model stream (H2b), blind-cell list, trend tests and gate evaluation.
     python sim.py blindcells --events dev_out/dev_events.csv --model model_pred_iid.json --out blind_cells.json
     python sim.py compare-model --events dev_out/dev_events.csv --model model_pred_iid.json     # H2b check
     python sim.py trend --events dev_out/dev_events.csv                                         # H1b / H1c
-    python sim.py gate-eval --events dev_out/dev_events.csv --cells blind_cells.json            # H3a / H3g
+    python sim.py gate-eval --events dev_out/dev_events.csv --cells blind_cells.json            # H3a / H3g (coverage basis)
 
 Tier 1 = static, rolling(W), periodic(W, R=W/4), gated-1L(W, K), gated-2L(W, K); CUSUM (level + variance
 statistics); iid and btclike (GARCH(1,1)-t) noise; level / variance shifts; benign-drift ramps.
@@ -84,14 +84,32 @@ def _garch(z, omega, alpha, beta):
         s2 = omega + alpha * r[t] * r[t] + beta * s2
     return r
 
+A1, B1, A2, B2, SHARE, NU = 0.12109, 0.72209, 0.022579, 0.95462, 0.45961, 5.2641
+_W1r, _W2r = SHARE * (1 - A1 - B1), (1 - SHARE) * (1 - A2 - B2)
+_M = (_W1r / (1 - B1) + _W2r / (1 - B2)) / (1 - A1 / (1 - B1) - A2 / (1 - B2))   # unconditional variance (about 7.96)
+W1, W2 = _W1r / _M, _W2r / _M                       # rescale so the unconditional variance is exactly 1
+V1_0, V2_0 = (W1 + A1) / (1 - B1), (W2 + A2) / (1 - B2)
+
+@njit(cache=True)
+def _garch2(z, w1, a1, b1, w2, a2, b2, v1, v2):
+    n = len(z)
+    r = np.empty(n)
+    for t in range(n):
+        r[t] = math.sqrt(v1 + v2) * z[t]
+        r2 = r[t] * r[t]
+        v1 = w1 + a1 * r2 + b1 * v1
+        v2 = w2 + a2 * r2 + b2 * v2
+    return r
 
 def noise(seed, arm, n=N):
     rng = np.random.default_rng(seed)
     if arm == "iid":
         return rng.standard_normal(n)
     if arm == "btclike":
+        # rng.standard_t(NU, n + BURN) * math.sqrt((NU - 2) / NU)
+        # return _garch(z, OMEGA, ALPHA, BETA)[BURN:]
         z = rng.standard_t(NU, n + BURN) * math.sqrt((NU - 2) / NU)
-        return _garch(z, OMEGA, ALPHA, BETA)[BURN:]
+        return _garch2(z, W1, A1, B1, W2, A2, B2, V1_0, V2_0)[BURN:]
     raise ValueError(arm)
 
 
@@ -539,6 +557,48 @@ def go_no_go(df, family_shifts, excl_contam=False, col="detect"):
     return out
 
 
+def shortened_table(df, family_shifts, excl_contam=False, col="coverage", thr=0.5, n_boot=10_000, seed=2026):
+    """H1a' on events: is the alert after the shift shortened to at most `thr` x static's? Per cell (shift, pol in
+    rolling/periodic, W): ratio of the mean of `col` (policy / static), bootstrap 95% CI of that ratio, one-sided paired
+    Wilcoxon (policy < static, zsplit for ties), Holm over the family. excl_contam drops events contaminated for either
+    policy. Default endpoint: alert coverage = fraction of the horizon bars in alert (works for persistent and for
+    intermittent detectors)."""
+    recs = []
+    rng = np.random.default_rng(seed)
+    for shift in family_shifts:
+        stf = df[(df["shift"] == shift) & (df["pol"] == "static")].set_index("seed")
+        for pol in ("rolling", "periodic"):
+            for W in sorted(df["W"].unique()):
+                if W == 0:
+                    continue
+                gf = df[(df["shift"] == shift) & (df["pol"] == pol) & (df["W"] == W)].set_index("seed")
+                common = stf.index.intersection(gf.index)
+                if excl_contam:
+                    common = common[(stf.loc[common, "contaminated"] == 0).values & (gf.loc[common, "contaminated"] == 0).values]
+                if len(common) < 5:
+                    continue
+                a = gf.loc[common, col].values.astype(float)
+                s_ = stf.loc[common, col].values.astype(float)
+                if s_.mean() <= 0:
+                    continue
+                idx = rng.integers(0, len(a), size=(n_boot, len(a)))
+                sm = s_[idx].mean(axis=1)
+                boot = a[idx].mean(axis=1) / np.where(sm > 0, sm, np.nan)
+                lo, hi = np.nanpercentile(boot, [2.5, 97.5])
+                try:
+                    p = float(sps.wilcoxon(a, s_, alternative="less", zero_method="zsplit").pvalue)
+                except Exception:
+                    p = 1.0
+                recs.append(dict(shift=shift, pol=pol, W=W, n=len(common), policy=a.mean(), static=s_.mean(),
+                                 ratio=a.mean() / s_.mean(), ci_lo=float(lo), ci_hi=float(hi), p_wilcoxon=p))
+    out = pd.DataFrame(recs)
+    if out.empty:
+        return out
+    out["p_holm"] = holm(out["p_wilcoxon"].values)
+    out["shortened_cell"] = (out["ratio"] <= thr) & (out["p_holm"] < 0.05)
+    return out
+
+
 def equivalence_table(df, tol=0.05):
     """Where are policies indistinguishable? Paired difference with a bootstrap 95% CI inside +/- tol."""
     pairs = [("rolling", "periodic"), ("gated2L", "rolling"), ("gated1L", "rolling"), ("gated2L", "static"),
@@ -603,6 +663,17 @@ def cmd_dev(a):
             practical = res[res["h1a_cell"] & (res["W"] >= 250)]
             print(f"H1a [{name}]: {'PASS' if n_cells else 'FAIL'}  ({n_cells} cells; {len(practical)} with W >= 250; "
                   f"{int(exc['h1a_cell'].sum())} when contaminated events are excluded)")
+            shf = [f for f in fam if f in set(df["shift"])]
+            sh = shortened_table(df, shf)
+            shx = shortened_table(df, shf, excl_contam=True)
+            sh.to_csv(os.path.join(a.out, f"shortened_{name.split()[0]}.csv"), index=False)
+            shx.to_csv(os.path.join(a.out, f"shortened_{name.split()[0]}_excl_contam.csv"), index=False)
+            print(f"\nH1a' family: {name} (alert coverage, policy / static; one-sided paired Wilcoxon; Holm over {len(sh)})")
+            print(sh.round(3).to_string(index=False))
+            n_s = int(sh["shortened_cell"].sum())
+            pr_s = sh[sh["shortened_cell"] & (sh["W"] >= 250)]
+            print(f"H1a' [{name}]: {'PASS' if n_s else 'FAIL'}  ({n_s} cells; {len(pr_s)} with W >= 250; "
+                  f"{int(shx['shortened_cell'].sum())} when contaminated events are excluded)")
         eq = equivalence_table(df)
         eq.to_csv(os.path.join(a.out, "equivalence.csv"), index=False)
         print(f"\nequivalence.csv written ({int(eq['equivalent'].sum())} of {len(eq)} comparisons inside +/-0.05).")
@@ -702,7 +773,7 @@ def cmd_ramp(a):
 
 # --- H2b: model stream -------------------------------------------------------------------------------------------
 @njit(cache=True)
-def _model_reps(n_rep, mode, pol, delta, W, R, h, k, ya, yb, pre, hz, gap, seed, o_det, o_dur, o_contam):
+def _model_reps(n_rep, mode, pol, delta, W, R, h, k, ya, yb, pre, hz, gap, seed, o_det, o_dur, o_contam, o_cov):
     np.random.seed(seed)
     T = pre + hz
     tau = pre
@@ -752,12 +823,16 @@ def _model_reps(n_rep, mode, pol, delta, W, R, h, k, ya, yb, pre, hz, gap, seed,
         o_det[rep] = d
         o_dur[rep] = du
         o_contam[rep] = co
+        cs = 0
+        for i in range(tau, T):
+            cs += alarm[i]
+        o_cov[rep] = cs / hz
 
 
 def model_cell(shift, pol, W, h, k, n_rep=4000, seed=2026, hz=H):
     """Monte Carlo of the Gaussian model stream: the detector (same k, calibrated h) on a stream whose standardised
     mean/scale follow the absorption model for the policy's update schedule. Ignores the baseline's estimation
-    noise. Returns P(detect), P(blind), mean/median duration of the first episode."""
+    noise. Returns P(detect), P(blind), mean/median duration of the first episode and the mean alert coverage."""
     kind, delta = shift
     mode = 0 if kind == "level" else 1
     R = max(1, W // 4)
@@ -766,11 +841,12 @@ def model_cell(shift, pol, W, h, k, n_rep=4000, seed=2026, hz=H):
     det = np.zeros(n_rep, np.int64)
     dur = np.zeros(n_rep, np.int64)
     con = np.zeros(n_rep, np.int64)
+    cov = np.zeros(n_rep)
     _model_reps(n_rep, mode, POLS[pol], float(delta or 0.0), float(max(W, 1)), R, float(h), float(k), ya, yb,
-                MODEL_PRE, hz, GAP, seed, det, dur, con)
+                MODEL_PRE, hz, GAP, seed, det, dur, con, cov)
     blind = (det == 0) | (dur < DMIN)
     return dict(P_detect=float(det.mean()), P_blind=float(blind.mean()), dur_mean=float(dur.mean()),
-                dur_median=float(np.median(dur)), contam=float(con.mean()))
+                dur_median=float(np.median(dur)), contam=float(con.mean()), cov_mean=float(cov.mean()))
 
 
 def model_predict(cal, deltas=(0.75, 1.0, 2.0), n_rep=4000, seed=2026):
@@ -798,14 +874,15 @@ def cmd_model(a):
 def cmd_compare_model(a):
     mp = json.load(open(a.model))["pred"]
     ev = pd.read_csv(a.events)
-    sim = ev.groupby(["shift", "pol", "W"])[["blind", "detect", "duration"]].mean().reset_index()
+    sim = ev.groupby(["shift", "pol", "W"])[["blind", "detect", "duration", "coverage"]].mean().reset_index()
     rows = []
     for _, r in sim.iterrows():
         key = f"{r['shift']}|{r['pol']}|{int(r['W'])}"
         if r["pol"] in ("rolling", "periodic") and r["shift"] in ("level1.0", "var") and key in mp:
             rows.append(dict(cell=key, W=int(r["W"]), sim_blind=r["blind"], model_blind=mp[key]["P_blind"],
                              sim_detect=r["detect"], model_detect=mp[key]["P_detect"],
-                             sim_dur=r["duration"], model_dur=mp[key]["dur_mean"]))
+                             sim_dur=r["duration"], model_dur=mp[key]["dur_mean"],
+                             sim_cov=r["coverage"], model_cov=mp[key].get("cov_mean", np.nan)))
     t = pd.DataFrame(rows)
     if t.empty:
         print("no comparable cells")
@@ -820,11 +897,19 @@ def cmd_compare_model(a):
     small = t[t["W"] <= 100]
     large = t[t["W"] > 100]
     print(f"  W <= 100: MAE {small['abs_err'].mean():.3f} (n={len(small)});  W > 100: MAE {large['abs_err'].mean():.3f} (n={len(large)})")
-    print(f"  H2b: {'PASS' if (t['abs_err'].mean() <= 0.10 and rho >= 0.8) else 'FAIL'}")
+    print(f"  H2b (P(blind)): {'PASS' if (t['abs_err'].mean() <= 0.10 and rho >= 0.8) else 'FAIL'}")
+    if t["model_cov"].notna().all():
+        t["cov_err"] = (t["sim_cov"] - t["model_cov"]).abs()
+        rho_c = sps.spearmanr(t["sim_cov"], t["model_cov"])[0]
+        print(f"\nH2b on alert coverage (the H1a' endpoint): MAE = {t['cov_err'].mean():.3f} (pass <= 0.10), "
+              f"Spearman = {rho_c:.2f} (pass >= 0.80); worst cell {t.loc[t['cov_err'].idxmax(), 'cell']} "
+              f"(err {t['cov_err'].max():.2f})")
+        print(f"  W <= 100: MAE {t[t['W'] <= 100]['cov_err'].mean():.3f};  W > 100: MAE {t[t['W'] > 100]['cov_err'].mean():.3f}")
+        print(f"  H2b (coverage): {'PASS' if (t['cov_err'].mean() <= 0.10 and rho_c >= 0.8) else 'FAIL'}")
 
 
 # --- blind cells, trend tests, gate evaluation -------------------------------------------------------------------
-def blind_cells(events_csv, model_json=None, thr=0.25):
+def blind_cells(events_csv, model_json=None, thr=0.25, cov_thr=0.5):
     """Frozen list used by H3a / H3g: (shift, reference policy, W) with P(blind | policy) - P(blind | static) >= thr,
     from the dev events and/or the model stream. Write it BEFORE the test run."""
     ev = pd.read_csv(events_csv)
@@ -852,6 +937,31 @@ def blind_cells(events_csv, model_json=None, thr=0.25):
             seen.add(kk)
             union.append(dict(shift=c["shift"], pol=c["pol"], W=c["W"]))
     out["union"] = union
+    # shortened cells (H1a' basis): alert coverage of the reference policy at most cov_thr x static's
+    cv = ev.groupby(["shift", "pol", "W"])["coverage"].mean()
+    out["cov_threshold"] = cov_thr
+    out["dev_cov"], out["model_cov"] = [], []
+    for shift in sorted(ev["shift"].unique()):
+        st = cv.get((shift, "static", 0), np.nan)
+        for pol in ("rolling", "periodic"):
+            for W in WGRID:
+                v = cv.get((shift, pol, W), np.nan)
+                if st > 0 and v / st <= cov_thr:
+                    out["dev_cov"].append(dict(shift=shift, pol=pol, W=W, ratio=float(v / st)))
+    if model_json:
+        for key, v in mp.items():
+            shift, pol, W = key.split("|")
+            st = mp.get(f"{shift}|static|0")
+            if pol in ("rolling", "periodic") and st is not None and "cov_mean" in v and st["cov_mean"] > 0 \
+                    and v["cov_mean"] / st["cov_mean"] <= cov_thr:
+                out["model_cov"].append(dict(shift=shift, pol=pol, W=int(W), ratio=float(v["cov_mean"] / st["cov_mean"])))
+    seen, union_cov = set(), []
+    for c in out["dev_cov"] + out["model_cov"]:
+        kk = (c["shift"], c["pol"], c["W"])
+        if kk not in seen:
+            seen.add(kk)
+            union_cov.append(dict(shift=c["shift"], pol=c["pol"], W=c["W"]))
+    out["union_cov"] = union_cov
     return out
 
 
@@ -872,9 +982,10 @@ def cmd_trend(a):
         t.to_csv(a.out, index=False)
 
 
-def gate_eval(ev, cells):
-    """H3a (1L) and H3g (2L) on the frozen blind cells: share of the P(blind) gap (reference policy - static)
-    that the gate closes, alert duration / coverage against the reference, P(detect) recovery against static."""
+def gate_eval(ev, cells, basis="coverage"):
+    """H3a (1L) and H3g (2L) on the frozen cells. basis="coverage": the gap is static coverage minus the reference
+    policy's coverage, and `closed` is the share of it the gate wins back; basis="blind": the gap is P(blind) of the
+    reference minus static's. Also reports alert duration, P(detect) recovery against static (>= 90%)."""
     rows = []
     for c in cells:
         sub = ev[ev["shift"] == c["shift"]]
@@ -882,36 +993,46 @@ def gate_eval(ev, cells):
         ref = sub[(sub["pol"] == c["pol"]) & (sub["W"] == c["W"])]
         if st.empty or ref.empty:
             continue
-        gap = ref["blind"].mean() - st["blind"].mean()
+        if basis == "coverage":
+            gap = st["coverage"].mean() - ref["coverage"].mean()
+        else:
+            gap = ref["blind"].mean() - st["blind"].mean()
+        if gap <= 0:
+            continue
         for g in ("gated1L", "gated2L"):
             for K in sorted(sub[sub["pol"] == g]["K"].unique()):
                 q = sub[(sub["pol"] == g) & (sub["W"] == c["W"]) & (sub["K"] == K)]
-                if q.empty or gap <= 0:
+                if q.empty:
                     continue
-                closed = (ref["blind"].mean() - q["blind"].mean()) / gap
-                rec = dict(shift=c["shift"], ref=c["pol"], W=c["W"], gate=g, K=K, gap=gap, closed=closed,
+                if basis == "coverage":
+                    closed = (q["coverage"].mean() - ref["coverage"].mean()) / gap
+                else:
+                    closed = (ref["blind"].mean() - q["blind"].mean()) / gap
+                rec = dict(basis=basis, shift=c["shift"], ref=c["pol"], W=c["W"], gate=g, K=K, gap=gap, closed=closed,
                            P_detect_gate=q["detect"].mean(), P_detect_static=st["detect"].mean(),
+                           cov_gate=q["coverage"].mean(), cov_ref=ref["coverage"].mean(), cov_static=st["coverage"].mean(),
                            dur_gate=q["duration"].mean(), dur_ref=ref["duration"].mean(),
-                           cov_gate=q["coverage"].mean(), cov_ref=ref["coverage"].mean())
+                           P_blind_gate=q["blind"].mean(), P_blind_ref=ref["blind"].mean())
                 rec["recovers_detect"] = bool(rec["P_detect_gate"] >= 0.9 * rec["P_detect_static"])
-                rec["H3a_ok"] = bool(closed >= 0.5 and rec["dur_gate"] > rec["dur_ref"] and rec["cov_gate"] > rec["cov_ref"])
+                rec["H3a_ok"] = bool(closed >= 0.5 and rec["cov_gate"] > rec["cov_ref"] and rec["dur_gate"] > rec["dur_ref"])
                 rec["H3g_ok"] = bool(closed >= 0.5 and rec["recovers_detect"])
                 rows.append(rec)
     return pd.DataFrame(rows)
 
 
 def cmd_gate_eval(a):
-    cells = json.load(open(a.cells))["union"]
-    res = gate_eval(pd.read_csv(a.events), cells)
-    pd.set_option("display.width", 220)
+    cells = json.load(open(a.cells))["union_cov" if a.basis == "coverage" else "union"]
+    res = gate_eval(pd.read_csv(a.events), cells, a.basis)
+    pd.set_option("display.width", 240)
     if res.empty:
-        print("no blind cells with a positive gap (nothing to evaluate)")
+        print("no cells with a positive gap (nothing to evaluate)")
         return
     print(res.round(3).to_string(index=False))
-    for g, flag in (("gated1L", "H3a_ok"), ("gated2L", "H3g_ok")):
-        d = res[(res["gate"] == g) & (res["K"] == 250)]
-        if len(d):
-            print(f"{'H3a' if g == 'gated1L' else 'H3g'} ({g}, K=250): {int(d[flag].sum())}/{len(d)} blind cells pass")
+    for K in sorted(res["K"].unique()):
+        for g, flag, name in (("gated1L", "H3a_ok", "H3a"), ("gated2L", "H3g_ok", "H3g")):
+            d = res[(res["gate"] == g) & (res["K"] == K)]
+            if len(d):
+                print(f"{name} ({g}, K={K}, basis={a.basis}): {int(d[flag].sum())}/{len(d)} cells pass")
     if a.out:
         res.to_csv(a.out, index=False)
 
@@ -1065,6 +1186,23 @@ def run_tests():
     A_r = rr[rr["pol"] == "rolling"]["A_ramp"].mean()
     ok &= _ok("ramp runner: a static baseline sits in alert on a +2 sigma ramp, a rolling W=250 baseline mostly does not",
               A_s > 0.5 and A_r < A_s, f"(static {A_s:.2f}, rolling {A_r:.2f})")
+    print("H1a' and model coverage")
+    rows = []
+    rg = np.random.default_rng(11)
+    for sd in range(1, 31):
+        rows.append(dict(seed=sd, shift="level1.0", pol="static", W=0, K=0, coverage=0.9 + 0.05 * rg.random(), contaminated=0))
+        for W, f in ((50, 0.2), (1000, 0.95)):
+            rows.append(dict(seed=sd, shift="level1.0", pol="rolling", W=W, K=0,
+                             coverage=min(1.0, f * (0.9 + 0.05 * rg.random()) + 0.02 * rg.random()), contaminated=0))
+    tt = shortened_table(pd.DataFrame(rows), ["level1.0"])
+    ok &= _ok("shortened_table flags a clearly shortened cell (ratio 0.2) and not an unchanged one",
+              bool(tt[(tt["pol"] == "rolling") & (tt["W"] == 50)]["shortened_cell"].iloc[0]) and
+              not bool(tt[(tt["pol"] == "rolling") & (tt["W"] == 1000)]["shortened_cell"].iloc[0]),
+              f"(ratios {tt['ratio'].round(2).tolist()})")
+    mr = model_cell(("level", 1.0), "rolling", 50, h, 0.5, n_rep=1000)
+    mst = model_cell(("level", 1.0), "static", 0, h, 0.5, n_rep=1000)
+    ok &= _ok("model stream coverage: W=50 rolling covers less of the horizon than static",
+              mr["cov_mean"] < mst["cov_mean"], f"({mr['cov_mean']:.2f} vs {mst['cov_mean']:.2f})")
     print("\nALL TESTS PASSED" if ok else "\nSOME TESTS FAILED")
     return 0 if ok else 1
 
@@ -1089,7 +1227,7 @@ def main():
     p.add_argument("--out", default="dev_out")
     p.add_argument("--persist", type=int, default=None)
     p.add_argument("--extra-deltas", type=float, nargs="*", default=[0.75])
-    p.add_argument("--ks", type=int, nargs="*", default=[250], help="gate freeze lengths (250 primary, 1000 secondary)")
+    p.add_argument("--ks", type=int, nargs="*", default=[250, 1000], help="gate freeze lengths (1000 primary, 250 secondary)")
     p = sub.add_parser("figure1")
     p.add_argument("--arm", default="btclike")
     p.add_argument("--cal", required=True)
@@ -1108,6 +1246,7 @@ def main():
     p.add_argument("--events", required=True)
     p.add_argument("--model", default=None)
     p.add_argument("--thr", type=float, default=0.25)
+    p.add_argument("--cov-thr", type=float, default=0.5)
     p.add_argument("--out", default="blind_cells.json")
     p = sub.add_parser("compare-model")
     p.add_argument("--events", required=True)
@@ -1118,6 +1257,7 @@ def main():
     p = sub.add_parser("gate-eval")
     p.add_argument("--events", required=True)
     p.add_argument("--cells", required=True)
+    p.add_argument("--basis", default="coverage", choices=["coverage", "blind"])
     p.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -1146,10 +1286,13 @@ def main():
     elif a.cmd == "model":
         cmd_model(a)
     elif a.cmd == "blindcells":
-        res = blind_cells(a.events, a.model, a.thr)
+        res = blind_cells(a.events, a.model, a.thr, a.cov_thr)
         json.dump(res, open(a.out, "w"), indent=1)
-        print(f"wrote {a.out}: {len(res['dev'])} cells from dev events, {len(res['model'])} from the model stream, "
-              f"{len(res['union'])} in the union")
+        print(f"wrote {a.out}")
+        print(f"  shortened cells (coverage <= {a.cov_thr} x static; H3 basis): {len(res['dev_cov'])} from dev events, "
+              f"{len(res['model_cov'])} from the model stream, {len(res['union_cov'])} in the union")
+        print(f"  P(blind) cells (gap >= {a.thr}; sensitivity): {len(res['dev'])} from dev events, "
+              f"{len(res['model'])} from the model stream, {len(res['union'])} in the union")
     elif a.cmd == "compare-model":
         cmd_compare_model(a)
     elif a.cmd == "trend":
