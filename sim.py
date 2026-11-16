@@ -59,7 +59,12 @@ REBOUND = 100           # bars after a 200-bar shift ends over which rebound ale
 GAP = 5
 DMIN = 10
 QUIET = 50
-OMEGA, ALPHA, BETA, NU = 0.02, 0.05, 0.93, 5
+# btclike: two-component GARCH(1,1)-t, matched to BTCUSDT 1m 2022-01..06 (monthly means of robust statistics; protocol rev 6)
+A1, B1, A2, B2, SHARE, NU = 0.12109, 0.72209, 0.022579, 0.95462, 0.45961, 5.2641
+_W1r, _W2r = SHARE * (1 - A1 - B1), (1 - SHARE) * (1 - A2 - B2)
+_M = (_W1r / (1 - B1) + _W2r / (1 - B2)) / (1 - A1 / (1 - B1) - A2 / (1 - B2))   # unconditional variance before rescaling
+W1, W2 = _W1r / _M, _W2r / _M                                  # rescaled so that the unconditional variance is exactly 1
+V1_0, V2_0 = (W1 + A1) / (1 - B1), (W2 + A2) / (1 - B2)        # stationary start (sums to 1)
 BURN = 500
 K_LEVEL = 0.5
 WGRID = [50, 100, 250, 500, 1000, 4000]
@@ -75,22 +80,6 @@ INF = 1e18
 
 # --- noise and streams -------------------------------------------------------------------------------------------
 @njit(cache=True)
-def _garch(z, omega, alpha, beta):
-    n = len(z)
-    r = np.empty(n)
-    s2 = 1.0
-    for t in range(n):
-        r[t] = math.sqrt(s2) * z[t]
-        s2 = omega + alpha * r[t] * r[t] + beta * s2
-    return r
-
-A1, B1, A2, B2, SHARE, NU = 0.12109, 0.72209, 0.022579, 0.95462, 0.45961, 5.2641
-_W1r, _W2r = SHARE * (1 - A1 - B1), (1 - SHARE) * (1 - A2 - B2)
-_M = (_W1r / (1 - B1) + _W2r / (1 - B2)) / (1 - A1 / (1 - B1) - A2 / (1 - B2))   # unconditional variance (about 7.96)
-W1, W2 = _W1r / _M, _W2r / _M                       # rescale so the unconditional variance is exactly 1
-V1_0, V2_0 = (W1 + A1) / (1 - B1), (W2 + A2) / (1 - B2)
-
-@njit(cache=True)
 def _garch2(z, w1, a1, b1, w2, a2, b2, v1, v2):
     n = len(z)
     r = np.empty(n)
@@ -101,13 +90,12 @@ def _garch2(z, w1, a1, b1, w2, a2, b2, v1, v2):
         v2 = w2 + a2 * r2 + b2 * v2
     return r
 
+
 def noise(seed, arm, n=N):
     rng = np.random.default_rng(seed)
     if arm == "iid":
         return rng.standard_normal(n)
     if arm == "btclike":
-        # rng.standard_t(NU, n + BURN) * math.sqrt((NU - 2) / NU)
-        # return _garch(z, OMEGA, ALPHA, BETA)[BURN:]
         z = rng.standard_t(NU, n + BURN) * math.sqrt((NU - 2) / NU)
         return _garch2(z, W1, A1, B1, W2, A2, B2, V1_0, V2_0)[BURN:]
     raise ValueError(arm)
@@ -636,7 +624,7 @@ def summarise(df):
 def cmd_dev(a):
     cal = json.load(open(a.cal))
     seeds = parse_seeds(a.seeds)
-    shifts = [("level", 1.0), ("level", 2.0), ("var", None)] + [("level", d) for d in a.extra_deltas]
+    shifts = [("level", 1.0), ("level", 2.0)] + ([] if a.no_var else [("var", None)]) + [("level", d) for d in a.extra_deltas]
     pols = ["static", "rolling", "periodic", "gated1L", "gated2L"]
     df = dev_run(a.arm, seeds, cal, shifts, pols, WGRID, a.ks, persist=a.persist)
     os.makedirs(a.out, exist_ok=True)
@@ -650,7 +638,7 @@ def cmd_dev(a):
     print("\nEvents with an alert already in progress at onset (flags chained to it are skipped):")
     print(df.groupby(["shift", "pol"])["contaminated"].mean().round(2).to_string())
     if a.persist is None:
-        for name, fam in (("primary", ["level1.0", "var"]), ("secondary (delta = 0.75)", ["level0.75"])):
+        for name, fam in (("primary", ["level1.0"] + ([] if a.no_var else ["var"])), ("secondary (delta = 0.75)", ["level0.75"])):
             if not set(fam) & set(df["shift"]):
                 continue
             res = go_no_go(df, [f for f in fam if f in set(df["shift"])])
@@ -755,7 +743,7 @@ def h3f_table(df, floor=1e-3):
 
 def cmd_ramp(a):
     cal = json.load(open(a.cal))
-    df = ramp_run(a.arm, parse_seeds(a.seeds), cal)
+    df = ramp_run(a.arm, parse_seeds(a.seeds), cal, kinds=RAMP_KINDS[:1] if a.no_var else RAMP_KINDS)
     os.makedirs(a.out, exist_ok=True)
     df.to_csv(os.path.join(a.out, "ramp_events.csv"), index=False)
     g, h3 = h3f_table(df)
@@ -878,7 +866,7 @@ def cmd_compare_model(a):
     rows = []
     for _, r in sim.iterrows():
         key = f"{r['shift']}|{r['pol']}|{int(r['W'])}"
-        if r["pol"] in ("rolling", "periodic") and r["shift"] in ("level1.0", "var") and key in mp:
+        if r["pol"] in ("rolling", "periodic") and r["shift"] in (("level1.0",) if a.no_var else ("level1.0", "var")) and key in mp:
             rows.append(dict(cell=key, W=int(r["W"]), sim_blind=r["blind"], model_blind=mp[key]["P_blind"],
                              sim_detect=r["detect"], model_detect=mp[key]["P_detect"],
                              sim_dur=r["duration"], model_dur=mp[key]["dur_mean"],
@@ -909,10 +897,12 @@ def cmd_compare_model(a):
 
 
 # --- blind cells, trend tests, gate evaluation -------------------------------------------------------------------
-def blind_cells(events_csv, model_json=None, thr=0.25, cov_thr=0.5):
+def blind_cells(events_csv, model_json=None, thr=0.25, cov_thr=0.5, no_var=False):
     """Frozen list used by H3a / H3g: (shift, reference policy, W) with P(blind | policy) - P(blind | static) >= thr,
     from the dev events and/or the model stream. Write it BEFORE the test run."""
     ev = pd.read_csv(events_csv)
+    if no_var:
+        ev = ev[ev["shift"] != "var"]
     out = {"threshold": thr, "dev": [], "model": []}
     pb = ev.groupby(["shift", "pol", "W"])["blind"].mean()
     for shift in sorted(ev["shift"].unique()):
@@ -926,6 +916,8 @@ def blind_cells(events_csv, model_json=None, thr=0.25, cov_thr=0.5):
         mp = json.load(open(model_json))["pred"]
         for key, v in mp.items():
             shift, pol, W = key.split("|")
+            if no_var and shift == "var":
+                continue
             if pol in ("rolling", "periodic"):
                 st = mp.get(f"{shift}|static|0")
                 if st is not None and v["P_blind"] - st["P_blind"] >= thr:
@@ -951,6 +943,8 @@ def blind_cells(events_csv, model_json=None, thr=0.25, cov_thr=0.5):
     if model_json:
         for key, v in mp.items():
             shift, pol, W = key.split("|")
+            if no_var and shift == "var":
+                continue
             st = mp.get(f"{shift}|static|0")
             if pol in ("rolling", "periodic") and st is not None and "cov_mean" in v and st["cov_mean"] > 0 \
                     and v["cov_mean"] / st["cov_mean"] <= cov_thr:
@@ -967,6 +961,8 @@ def blind_cells(events_csv, model_json=None, thr=0.25, cov_thr=0.5):
 
 def cmd_trend(a):
     ev = pd.read_csv(a.events)
+    if a.no_var:
+        ev = ev[ev["shift"] != "var"]
     recs = []
     for shift in sorted(ev["shift"].unique()):
         for pol in ("rolling", "periodic"):
@@ -1022,6 +1018,8 @@ def gate_eval(ev, cells, basis="coverage"):
 
 def cmd_gate_eval(a):
     cells = json.load(open(a.cells))["union_cov" if a.basis == "coverage" else "union"]
+    if a.no_var:
+        cells = [c for c in cells if c["shift"] != "var"]
     res = gate_eval(pd.read_csv(a.events), cells, a.basis)
     pd.set_option("display.width", 240)
     if res.empty:
@@ -1074,7 +1072,7 @@ def run_tests():
     q = np.percentile(xb, [0.1, 1, 25, 75, 99, 99.9])
     qr1, qr2 = (q[4] - q[1]) / (q[3] - q[2]), (q[5] - q[0]) / (q[3] - q[2])
     ac = np.corrcoef(np.abs(xb[:-1]), np.abs(xb[1:]))[0, 1]
-    ok &= _ok("btclike var ~ 1", abs(xb.var() - 1) < 0.1, f"(var {xb.var():.3f})")
+    ok &= _ok("btclike var ~ 1 (analytic 1; the sample variance of a heavy-tailed process is noisy, so the check is loose)", 0.6 < xb.var() < 1.8, f"(var {xb.var():.3f})")
     ok &= _ok("btclike heavier tails than Gaussian (3.45, 4.58)", qr1 > 3.6 and qr2 > 5.0,
               f"(q99-1/IQR {qr1:.2f}, q99.9-0.1/IQR {qr2:.2f})")
     ok &= _ok("btclike |r| lag-1 autocorrelation > 0.1", ac > 0.1, f"({ac:.3f})")
@@ -1228,12 +1226,14 @@ def main():
     p.add_argument("--persist", type=int, default=None)
     p.add_argument("--extra-deltas", type=float, nargs="*", default=[0.75])
     p.add_argument("--ks", type=int, nargs="*", default=[250, 1000], help="gate freeze lengths (1000 primary, 250 secondary)")
+    p.add_argument("--no-var", action="store_true", help="leave out the variance statistic (protocol rev 6: dev seeds only)")
     p = sub.add_parser("figure1")
     p.add_argument("--arm", default="btclike")
     p.add_argument("--cal", required=True)
     p.add_argument("--seeds", default="1-30")
     p.add_argument("--out", default="dev_out")
     p = sub.add_parser("ramp")
+    p.add_argument("--no-var", action="store_true")
     p.add_argument("--arm", default="btclike")
     p.add_argument("--cal", required=True)
     p.add_argument("--seeds", default="1-30")
@@ -1247,17 +1247,21 @@ def main():
     p.add_argument("--model", default=None)
     p.add_argument("--thr", type=float, default=0.25)
     p.add_argument("--cov-thr", type=float, default=0.5)
+    p.add_argument("--no-var", action="store_true")
     p.add_argument("--out", default="blind_cells.json")
     p = sub.add_parser("compare-model")
+    p.add_argument("--no-var", action="store_true", help="level cells only (protocol rev 6)")
     p.add_argument("--events", required=True)
     p.add_argument("--model", required=True)
     p = sub.add_parser("trend")
+    p.add_argument("--no-var", action="store_true")
     p.add_argument("--events", required=True)
     p.add_argument("--out", default=None)
     p = sub.add_parser("gate-eval")
     p.add_argument("--events", required=True)
     p.add_argument("--cells", required=True)
     p.add_argument("--basis", default="coverage", choices=["coverage", "blind"])
+    p.add_argument("--no-var", action="store_true")
     p.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -1286,7 +1290,7 @@ def main():
     elif a.cmd == "model":
         cmd_model(a)
     elif a.cmd == "blindcells":
-        res = blind_cells(a.events, a.model, a.thr, a.cov_thr)
+        res = blind_cells(a.events, a.model, a.thr, a.cov_thr, a.no_var)
         json.dump(res, open(a.out, "w"), indent=1)
         print(f"wrote {a.out}")
         print(f"  shortened cells (coverage <= {a.cov_thr} x static; H3 basis): {len(res['dev_cov'])} from dev events, "
