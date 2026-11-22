@@ -4,7 +4,7 @@ When does recalibration blind a streaming anomaly detector to persistent shifts,
 
 A persistent shift is both an anomaly and the new normal. The right behaviour is **alert, hold, then re-baseline**. An adaptive baseline can instead absorb the shift before the detector has finished reacting. This repository contains a pre-registered simulation study of that effect, and of a drift-gated update policy that keeps adaptation without the blindness.
 
-**Status: pre-registration stage. No results yet.** The protocol is drafted, the simulator is partly built, and the test seeds have not been run.
+**Status** test run complete, preprint in draft
 
 ## Claims under test
 
