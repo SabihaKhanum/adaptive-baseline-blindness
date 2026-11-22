@@ -3,7 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 .venv/
-
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.out
 # C extensions
 *.so
 
