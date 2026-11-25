@@ -1,0 +1,239 @@
+{
+ "arm": "btclike",
+ "cells": {
+  "ewma|static|0": {
+   "det": "ewma",
+   "pol": "static",
+   "W": 0,
+   "h": 1.1904811464288179,
+   "rate_cal": 1.0,
+   "rate_chk": 1.1482683982683983,
+   "ok": true
+  },
+  "ewma|rolling|50": {
+   "det": "ewma",
+   "pol": "rolling",
+   "W": 50,
+   "h": 0.9022673523932505,
+   "rate_cal": 1.0,
+   "rate_chk": 0.9707792207792207,
+   "ok": true
+  },
+  "ewma|rolling|100": {
+   "det": "ewma",
+   "pol": "rolling",
+   "W": 100,
+   "h": 0.9360149722143872,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0541125541125542,
+   "ok": true
+  },
+  "ewma|rolling|250": {
+   "det": "ewma",
+   "pol": "rolling",
+   "W": 250,
+   "h": 1.0046735633904476,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0643939393939394,
+   "ok": true
+  },
+  "ewma|rolling|500": {
+   "det": "ewma",
+   "pol": "rolling",
+   "W": 500,
+   "h": 1.0497877500271937,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0297619047619047,
+   "ok": true
+  },
+  "ewma|rolling|1000": {
+   "det": "ewma",
+   "pol": "rolling",
+   "W": 1000,
+   "h": 1.0853389552241786,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0243506493506493,
+   "ok": true
+  },
+  "ewma|rolling|4000": {
+   "det": "ewma",
+   "pol": "rolling",
+   "W": 4000,
+   "h": 1.094345336597292,
+   "rate_cal": 1.0,
+   "rate_chk": 1.066017316017316,
+   "ok": true
+  },
+  "ewma|periodic|50": {
+   "det": "ewma",
+   "pol": "periodic",
+   "W": 50,
+   "h": 0.9807924274199845,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0108225108225108,
+   "ok": true
+  },
+  "ewma|periodic|100": {
+   "det": "ewma",
+   "pol": "periodic",
+   "W": 100,
+   "h": 1.0331485216916112,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0676406926406927,
+   "ok": true
+  },
+  "ewma|periodic|250": {
+   "det": "ewma",
+   "pol": "periodic",
+   "W": 250,
+   "h": 1.1245491898957134,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0784632034632036,
+   "ok": true
+  },
+  "ewma|periodic|500": {
+   "det": "ewma",
+   "pol": "periodic",
+   "W": 500,
+   "h": 1.1843595882880817,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0411255411255411,
+   "ok": true
+  },
+  "ewma|periodic|1000": {
+   "det": "ewma",
+   "pol": "periodic",
+   "W": 1000,
+   "h": 1.2158423121159345,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0838744588744589,
+   "ok": true
+  },
+  "ewma|periodic|4000": {
+   "det": "ewma",
+   "pol": "periodic",
+   "W": 4000,
+   "h": 1.160402457266454,
+   "rate_cal": 1.0,
+   "rate_chk": 1.106060606060606,
+   "ok": true
+  },
+  "ma20|static|0": {
+   "det": "ma20",
+   "pol": "static",
+   "W": 0,
+   "h": 4.456181460148427,
+   "rate_cal": 1.0,
+   "rate_chk": 1.1596320346320346,
+   "ok": true
+  },
+  "ma20|rolling|50": {
+   "det": "ma20",
+   "pol": "rolling",
+   "W": 50,
+   "h": 3.358885319997745,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0005411255411256,
+   "ok": true
+  },
+  "ma20|rolling|100": {
+   "det": "ma20",
+   "pol": "rolling",
+   "W": 100,
+   "h": 3.542862071437449,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0286796536796536,
+   "ok": true
+  },
+  "ma20|rolling|250": {
+   "det": "ma20",
+   "pol": "rolling",
+   "W": 250,
+   "h": 3.8216661796280422,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0438311688311688,
+   "ok": true
+  },
+  "ma20|rolling|500": {
+   "det": "ma20",
+   "pol": "rolling",
+   "W": 500,
+   "h": 3.951106654782757,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0795454545454546,
+   "ok": true
+  },
+  "ma20|rolling|1000": {
+   "det": "ma20",
+   "pol": "rolling",
+   "W": 1000,
+   "h": 4.1073509580323275,
+   "rate_cal": 1.0,
+   "rate_chk": 1.057900432900433,
+   "ok": true
+  },
+  "ma20|rolling|4000": {
+   "det": "ma20",
+   "pol": "rolling",
+   "W": 4000,
+   "h": 4.1233156018538875,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0784632034632036,
+   "ok": true
+  },
+  "ma20|periodic|50": {
+   "det": "ma20",
+   "pol": "periodic",
+   "W": 50,
+   "h": 3.848523089948931,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0054112554112553,
+   "ok": true
+  },
+  "ma20|periodic|100": {
+   "det": "ma20",
+   "pol": "periodic",
+   "W": 100,
+   "h": 4.0465372458930435,
+   "rate_cal": 1.0,
+   "rate_chk": 1.073051948051948,
+   "ok": true
+  },
+  "ma20|periodic|250": {
+   "det": "ma20",
+   "pol": "periodic",
+   "W": 250,
+   "h": 4.328643904616147,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0773809523809523,
+   "ok": true
+  },
+  "ma20|periodic|500": {
+   "det": "ma20",
+   "pol": "periodic",
+   "W": 500,
+   "h": 4.5282080275673335,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0595238095238095,
+   "ok": true
+  },
+  "ma20|periodic|1000": {
+   "det": "ma20",
+   "pol": "periodic",
+   "W": 1000,
+   "h": 4.590451308016453,
+   "rate_cal": 1.0,
+   "rate_chk": 1.0708874458874458,
+   "ok": true
+  },
+  "ma20|periodic|4000": {
+   "det": "ma20",
+   "pol": "periodic",
+   "W": 4000,
+   "h": 4.33932752519821,
+   "rate_cal": 1.0,
+   "rate_chk": 1.1044372294372293,
+   "ok": true
+  }
+ }
+}
